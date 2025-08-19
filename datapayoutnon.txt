@@ -1,0 +1,1005 @@
+const allowedMerchantIds = [1799, 1798, 1797, 1796, 1795, 1794, 1650, 1646, 1645, 1644, 1649, 1648, 1647];
+
+if (allowedMerchantIds.includes(merchantId)) {
+    if (!privateKey || privateKey === '') {
+        return res.status(402).json({
+            data: {
+                errorCode: 'ERR402',
+                errorMessage: ["Invalid request due to missing private-Key"]
+            }
+        });
+    }
+}
+
+
+const mysqlcon = require("../../../config/db_connection");
+const payouthelper = require("../helper/payoutHelper")
+const Setpayouthelper = require("../PayoutSetMethod/NonInrSetMethod")
+const key = require("../../../config/config");
+const axios = require('axios')
+const currentUTC = new Date();
+const crypto = require('crypto');
+const istOffset = 5.5 * 60 * 60 * 1000;
+const istTime = new Date(currentUTC.getTime() + istOffset);
+const formattedIST = istTime.toISOString().slice(0, 19).replace('T', ' ');
+const md5 = require("md5")
+
+function isJSON(string) {
+    try {
+        JSON.parse(string);
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+function generatedSignatureWithPrivateKey(privateKey, decrypted_msg) {
+    try {
+
+        privateKey = privateKey.replace(/\\n/g, '\n');
+        const sign = crypto.createSign("RSA-SHA256");
+        sign.update(decrypted_msg);
+        sign.end();
+        const signature = sign.sign(privateKey, "base64");
+
+        return signature;
+    } catch (err) {
+        return false;
+    }
+};
+
+
+function verifySignatureWithPrivateKey(publicKey, decrypted_msg, privatekeysignature) {
+    try {
+        publicKey = publicKey.replace(/\\n/g, '\n');
+        const verify = crypto.createVerify("RSA-SHA256");
+        verify.update(decrypted_msg);
+        verify.end();
+        const isValid = verify.verify(publicKey, privatekeysignature, "base64");
+        return isValid;
+    } catch (err) {
+        return false;
+    }
+}
+
+module.exports.payoutNonInr = async (req, res) => {
+    try {
+        const enc = req.body;
+        const reqHeaders = req.headers;
+        const decryption_Data = enc['enc_payout_json'];
+        const endpoint_url = enc['end_point_url'];
+        let privateKey = req.headers['private-key'];
+        if (reqHeaders['user-token'] && reqHeaders['user-token'].trim() !== '') {
+            var encodedToken = reqHeaders['user-token'];
+            const decodedToken = Buffer.from(encodedToken, 'base64').toString('utf-8').split('::');
+            if (decodedToken[0] && decodedToken[1] && decodedToken[0] !== '' && decodedToken[1] !== '') {
+                var merchantId = decodedToken[0];
+                var secretKey = decodedToken[1];
+            } else {
+                return res.status(402).json({
+                    data: {
+                        errorCode: 'ERR402',
+                        errorMessage: ["User-token wrong generated."]
+                    }
+                })
+            }
+        } else {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["Invalid request due to missing user-token"]
+                }
+            })
+        }
+        if (!reqHeaders['x-api-key'] || reqHeaders['x-api-key'] == '') {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["Invalid request due to missing x-api-key"]
+                }
+            })
+        }
+        if (!decryption_Data || decryption_Data == '') {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["please provide enc_payout_json "]
+                }
+            })
+        }
+        if (!endpoint_url || endpoint_url == '') {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["please provide end_point_url "]
+                }
+            })
+        }
+        if (!privateKey || privateKey == '') {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["Invalid request due to missing private-Key"]
+                }
+            })
+        }
+        var xapikey = reqHeaders['x-api-key']
+        var detail = await payouthelper.getDetail(merchantId, secretKey);
+        if (!detail) {
+            const message = 'Merchant details are not matching. Please check again.';
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: [message]
+                }
+            })
+        }
+        var merchantIIv = detail.sec_iv;
+        var x_ApiKey = key.x_api_key;
+        if (xapikey != x_ApiKey) {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["X api key is not matching. Please check again"]
+                }
+            });
+        };
+        if (detail.status != 1) {
+            const message = 'Current merchant profile is not active, Contact to Admin.';
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: [message]
+                }
+            })
+        }
+        if (detail.allow_webpayment != 1) {
+            const message = 'Your Web Payment mode is not activated.';
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: [message]
+                }
+            })
+        }
+        const merchantSecret = secretKey;
+        const merchantiv = merchantIIv;
+        const decryptionData = decryption_Data;
+        var decrypted_msg = await payouthelper.decryptValue(decryptionData, merchantId, merchantSecret, merchantiv)
+        if (!decrypted_msg) {
+            const data_json = "Encrypt json data is not correct";
+            data = {
+                errorCode: 'ERR402',
+                errorMessage: [data_json]
+            }
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: [data_json]
+                }
+            })
+        }
+        let order = decrypted_msg[0].order_id
+        let currency = decrypted_msg[0].CurrencyCode;
+        decrypted_msg = JSON.stringify(decrypted_msg);
+
+        let privatekeysignature = generatedSignatureWithPrivateKey(privateKey, decrypted_msg)
+
+        if (privatekeysignature == false) {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["error due to invalid private_key"]
+                }
+            })
+        }
+        let sqlpublic = "select * from  tbl_payout_public_key where user_id=?";
+        let result = await mysqlcon(sqlpublic, [merchantId])
+        let publicKey = result[0].publicKey
+
+        let isValid = verifySignatureWithPrivateKey(publicKey, decrypted_msg, privatekeysignature)
+        if (isValid != true) {
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: ["error due to verify private_key and reqdata"]
+                }
+            })
+        }
+        let testArray = ['TransactionID', 'MemberID', 'CurrencyCode', 'BankCode', 'ToAccountNumber', 'ToAccountName', 'ToProvince', 'ToCity', 'ToBranch', 'ToAddress', 'Email', 'Phone', 'Amount', 'Note', 'Optional'];
+
+        if (isJSON(decrypted_msg) && decrypted_msg.startsWith('[')) {
+            const parsedJson = JSON.parse(decrypted_msg);
+            if (parsedJson && typeof parsedJson[0] === 'object') {
+                const keysCount = Object.keys(parsedJson[0]).length;
+
+                if (keysCount === 15 || keysCount === 14) {
+                    let missingKeys = testArray.filter(key => !(key in parsedJson[0]));
+                    if (missingKeys.length > 0) {
+                        return res.status(402).json({
+                            data: {
+                                errorCode: 'ERR402',
+                                errorMessage: [`Missing keys: ${missingKeys.join(', ')}`]
+                            }
+                        });
+                    }
+
+                    // You can keep your empty field check here if needed
+                    let emptyFields = [];
+                    for (const [key, value] of Object.entries(parsedJson[0])) {
+                        if (value === '') {
+                            emptyFields.push(key);
+                        }
+                    }
+
+                    if (emptyFields.length > 0) {
+                        return res.status(402).json({
+                            data: {
+                                errorCode: 'ERR402',
+                                errorMessage: [`Empty fields: ${emptyFields.join(', ')}`]
+                            }
+                        });
+                    }
+
+                } else {
+                    return res.status(402).json({
+                        data: {
+                            errorCode: 'ERR402',
+                            errorMessage: ["Entered encrypted parameter length is not correct"]
+                        }
+                    });
+                }
+            }
+        }
+        if (decrypted_msg == '') {
+            const data_json = "Encrypt json data is not correct";
+            data = {
+                errorCode: 'ERR402',
+                errorMessage: [data_json]
+            }
+            return res.status(402).json({
+                data: {
+                    errorCode: 'ERR402',
+                    errorMessage: [data_json]
+                }
+            })
+        }
+        else {
+            let payoutJsonData1 = JSON.parse(decrypted_msg);
+            var resultSql = await payouthelper.getAssignGatewayDetail(merchantId, currency);
+            var assignPayPayoutGateway = resultSql;
+
+            if (assignPayPayoutGateway == 2075) { // zovi payout
+                let userResponseData = [];
+
+                for (const payData of payoutJsonData1) {
+                    var state = 'PENDING';
+                    var stateCode = 'SUCC201';
+                    var message = "Transaction pending"
+                    var utr = '';
+                    var urn = '';
+                    const txn_amount = payData.Amount;
+                    const order_no = payData.TransactionID;
+                    var resultSqlOrder = await payouthelper.checkPayoutOrderAlreadyExist(order_no);
+
+                    if (resultSqlOrder != null && resultSqlOrder != undefined && resultSqlOrder != '') {
+                        state = 'FAILED';
+                        stateCode = 'ERR411';
+                        message = 'The provided order ID already exists or is invalid.';
+                        const responseMsg = {
+                            status: state,
+                            order_id: order_no,
+                            payment_code: stateCode,
+                            requested_amount: txn_amount,
+                            payout_amount: payData.Amount,
+                            message: message,
+                            utr: "",
+                            //customerOrderId: customerOrderId
+                        }
+
+                        userResponseData.push(responseMsg);
+                        const response_array = {
+                            status: state,
+                            data: await payouthelper.encryptedValueNew(JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+                            payment_code: stateCode,
+                            message: message
+                        }
+                        await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+                        return res.status(201).json(response_array)
+
+                    }
+
+                    let optional = {};
+
+                    if (payData && payData.Optional) {
+                        optional = payData.Optional;
+                    }
+                    const uid = merchantId;
+
+                    const ccode = payData.CurrencyCode;
+                    const charges = await payouthelper.getMerchantPayinCharges(ccode, uid);
+                    let bank_charges = payouthelper.getBankAdditionalCharges(assignPayPayoutGateway);
+                    bank_charges = bank_charges.additional_charges;
+
+                    let payout_charges = 0;
+                    let gst_charges = 0;
+
+                    if (charges) {
+                        payout_charges = charges.payout_amount ? charges.payout_amount : 0;
+                        gst_charges = charges.gst_amount ? charges.gst_amount : 0;
+                    }
+                    let fixed_payout_charge = (parseFloat(detail.payout_charge / 100) * parseFloat(payData['Amount']));
+                    let flat_fee_payout = detail.flat_fee_payout || 0;
+
+                    const akonto_charge = (parseFloat(payData.Amount) * parseFloat(payout_charges)) / 100;
+                    const gst_amount = (parseFloat(akonto_charge) * gst_charges) / 100;
+                    const wallet_deduct = parseFloat(payData.Amount) + parseFloat(akonto_charge) + parseFloat(gst_amount) + parseFloat(bank_charges) + parseFloat(fixed_payout_charge) + parseFloat(flat_fee_payout);
+
+                    payData.remark = "zovi payout";
+
+                    if (detail.wallet < wallet_deduct) {
+                        let urn='';
+                        state = "FAILURE";
+                        stateCode = "ERR409";
+                        message = "Insufficient balance in your account.";
+
+                        const response_msg = {
+                            status: state,
+                            order_id: order_no,
+                            payment_code: stateCode,
+                            requested_amount: txn_amount,
+                            payout_amount: payData.Amount,
+                            currency: currency,
+                            message: message,
+                            utr: "",
+                            // customerOrderId: customerOrderId
+                        };
+
+                        const response = {
+                            status: "fail",
+                            message: "Due to Insufficient balance in your account not sent to bank"
+                        };
+
+                        const payout_log = {
+                            users_id: detail.id,
+                            type: 0,
+                            req_to_bank: JSON.stringify(payData),
+                            res_from_bank: response,
+                            message: "Due to Insufficient balance in your account not sent to bank"
+                        };
+                        await Setpayouthelper.setZovidetails(payData,
+                            response_msg,
+                            0,
+                            akonto_charge,
+                            bank_charges,
+                            gst_amount,
+                            wallet_deduct,
+                            response,
+                            payout_log,
+                            urn,
+                            txn_amount,
+                            merchantId,
+                            endpoint_url,
+                            decryption_Data
+                        );
+
+                        userResponseData.push(response_msg);
+
+                        const response_array = {
+                            status: true,
+                            data: await payouthelper.encryptedValueNew(
+                                JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+                            payment_code: stateCode,
+                            message: message
+                        };
+                        await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+
+                        return res.status(201).json(response_array)
+                    }
+                    if (detail.wallet >= wallet_deduct) {
+                        let detail = await payouthelper.getDetail(merchantId, secretKey);
+                        let wallet = (detail.wallet) - (wallet_deduct)
+                        let sqlWallet = 'UPDATE tbl_user SET wallet = ? WHERE id = ?';
+                        await mysqlcon(sqlWallet, [wallet, merchantId]);
+                        const wallet_log = {
+                            order_id: order_no,
+                            merchant_id: detail.id,
+                            current_wallet: detail.wallet,
+                            update_wallet_tot: detail.wallet - wallet_deduct,
+                            current_action: 2,
+                            login_admin: 1,
+                            effective_amt: wallet_deduct,
+                            created_on: formattedIST,
+                        }
+                        let sqlUpdateLog = 'INSERT INTO tbl_wallet_update_log SET ?';
+                        await mysqlcon(sqlUpdateLog, [wallet_log]);
+
+                       
+                        const request = {
+                            merchant_id: 'MID-656635',
+                            payment_type: 'UIT',
+                            merchant_order_id: payData.TransactionID,
+                            post_back_url: 'https://google.com',
+                            amount: payData.Amount,
+                            currency: payData.CurrencyCode,
+                            bank_code: payData.BankCode,
+                            success_redirect_url: 'https://google.com/success',
+                            failure_redirect_url: 'https://google.com/failure',
+                            account_number: payData.ToAccountNumber
+                        };
+                        const formData = JSON.stringify(request);
+
+                        const headers = {
+                            'Content-Type': 'application/json',
+                            'X-Public-Key': 'CztHYNjuw7c0kjtGBurSJZEPPxmRmDUCpLbPjYqCvX2TbJaHz5kPWQ7SOKQmlFFk',
+                            'X-Secret-Key': 'RTUnzbITtGkX81IeypHLdriZm4mKDBf1T3XquIW6p0uOOGf76jgOwXVgxo2jeBqU',
+                            'Accept': 'application/json',
+                            'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiOWRmYjMxMGZkNjAxNmViNGI3ZTdiZjViM2JiMmJiMTA0NGZjNWE3MjM1MjQxYTg3MzA3MDUyNDVjZGVhNWFlYmU2OWE3NDI3ZjY3ZGYxOTYiLCJpYXQiOjE3NDgzNDQ2NzkuNTMwMjQyLCJuYmYiOjE3NDgzNDQ2NzkuNTMwMjQ1LCJleHAiOjE3Nzk4ODA2NzkuNTIyOTMsInN1YiI6IjEyOCIsInNjb3BlcyI6W119.RY7ffDcKzF2Zd_qrdmiL5ZmFMl_GR13ryw4_3XkA1gP8WJthhWPvLGS_R9lPOB8mtQw_jrpjZM1E94twUDcGR4eQpfYj-rybh4Wso-U9HlbP-3NyImcdrjXRFC5L7pU23Z6xtQf9wU58tzy93ObddCVSeEnssOLaxAwoEvbrVSCOGwnNHD-fpjrCYqXiie4I1ets3-t2_lD6dglCCT56O9Rek0BkStPS_x-zMxlUqWgeUL8KQr-bgQl47D9jY4Je3smZLCn6-n4m8gpuQa4Od_KYcgIn5Mg4XkdAm-Toln7LmUh5tuIKQwpsgvCR4pmWgXGSJkMIICef45nZkdlxv5BYiP0ZgV63ZpzoXdko_iGbMKqXcza1DWkPJBC_yXq2Hdcz8vGIh3CNr4ielCB5uhk2oz7Z993NfYLXHrLvlsuqHIQ5T9uD1wQZvgPc-MGKAbhiNGE_74BQw-m8bOGJWFv5Oo_gQUGg2GtNRloMFWjG6nIMWtuOJCQZ8WoiAWkajFZAwckAw6kgC2dvJZNBgAuQPp21Nch6D7CYd-Yjry4AGPpm47-1VF6CyC72aF4vCbWIj4Vp5Wufb3m9DwpfTfo2Fx3YOV48VqI0CcKaYFg_WeUneFL-jEbwkiZzro4fBn5dKkI3AGZVtBO2bKzWHcPHp3g7VHRFW6gynFalm8c',
+                            'User-Agent': 'MyCustomUserAgent/1.0'
+                        };
+
+                        axios.post('https://api.devlog.xyz/api/v1/merchant/transaction/uit/pay-out', formData, { headers })
+                            .then(response => {
+                                console.log('Response:', response.data);
+                            })
+                            .catch(error => {
+                                console.error('Error:', error.response?.data || error.message);
+                            });
+
+                        response = response.data;
+
+                        const payout_log = {
+                            users_id: detail.id,
+                            type: 0,
+                            req_to_bank: JSON.stringify(request),
+                            res_from_bank: response
+                        };
+
+                        let sqlpayout_json = 'INSERT INTO tbl_payout_json SET ?';
+                        await mysqlcon(sqlpayout_json, [payout_log]);
+
+                        if (status == 'approved') {
+
+
+                        } else {
+                            console.log('bdf;lskkj')
+                            state = "FAILURE";
+                            stateCode = "SUCC202";
+                            message = "Transaction failed";
+
+                            let wallet = (detail.wallet) + (wallet_deduct)
+                            let sqlWallet = 'UPDATE tbl_user SET wallet = ? WHERE id = ?';
+                            await mysqlcon(sqlWallet, [wallet, merchantId]);
+
+                            const wallet_log = {
+                                order_id: order_no,
+                                merchant_id: detail.id,
+                                current_wallet: detail.wallet,
+                                update_wallet_tot: detail.wallet + wallet_deduct,
+                                current_action: 1,
+                                login_admin: 1,
+                                effective_amt: wallet_deduct,
+                                created_on: formattedIST,
+                            }
+                            let sqlUpdateLog = 'INSERT INTO tbl_wallet_update_log SET ?';
+                            await mysqlcon(sqlUpdateLog, [wallet_log]);
+                        }
+                        let response_msg = {
+                            status: state,
+                            order_id: order_no,
+                            payment_code: stateCode,
+                            requested_amount: txn_amount,
+                            payout_amount: payData.Amount,
+                            currency: currency,
+                            message: message,
+                            utr: '',
+                            //  customerOrderId : customerOrderId
+                        }
+                        await Setpayouthelper.setZovidetails(payData,
+                            response_msg,
+                            0,
+                            akonto_charge,
+                            bank_charges,
+                            gst_amount,
+                            wallet_deduct,
+                            response,
+                            payout_log,
+                            urn,
+                            txn_amount,
+                            merchantId,
+                            endpoint_url,
+                            decryption_Data
+                        );
+                        userResponseData.push(response_msg);
+                    }
+                }
+                const response_array = {
+                    status: state,
+                    data: await payouthelper.encryptedValueNew(JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+                    payment_code: stateCode,
+                    message: message
+                }
+                // const cb_res = JSON.stringify(response_array);
+                // const cbarr1 = {
+                //     callback_response: cb_res
+                // }
+                // const updateQuery = "UPDATE tbl_icici_payout_transaction_response_details SET callback_response = ? WHERE uniqueid = ?";
+                // await mysqlcon(updateQuery, [cbarr1.callback_response, order]);
+
+                // const cbarr = {
+                //     end_point_response: cb_res,
+                //     endpoint_response_decrypt: JSON.stringify(userResponseData),
+                //     order_no: order,
+                //     type: 1
+                // };
+
+                // const insertQuery = "INSERT INTO tbl_payout_json (end_point_response, endpoint_response_decrypt, order_no, type) VALUES (?, ?, ?, ?)";
+                // await mysqlcon(insertQuery, [cbarr.end_point_response, cbarr.endpoint_response_decrypt, cbarr.order_no, cbarr.type]);
+                await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+                return res.status(201).json({
+                    data: {
+                        errorCode: 'ERR201',
+                        errorMessage: response_array
+                    }
+                })
+            }
+
+        }
+    } catch (err) {
+        console.log(err);
+        return res.status(402).json({
+            err: err
+        })
+    }
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+//         const merchant = 'ubankconnect';
+// const secret_key = '74df3419523cf245b6633333f1996481';
+// const url = 'https://cloud.la2568.site/api/daifu';
+
+// // Prepare request data
+// const requestData = {
+//   merchant: merchant,
+//   total_amount: 100.00,
+//   callback_url: 'https://www.sarkariresult.com',
+//   order_id: 'abc12366',
+//   bank: 'gcash',
+//   bank_card_name: 'John Doe',
+//   bank_card_account: '1234567890',
+//   bank_card_remark: 'SBIN0070695'
+// };
+
+// // Generate MD5 Signature
+// const sigData =
+//   'bank=' + requestData.bank +
+//   '&bank_card_account=' + requestData.bank_card_account +
+//   '&bank_card_name=' + requestData.bank_card_name +
+//   '&bank_card_remark=' + requestData.bank_card_remark +
+//   '&callback_url=' + requestData.callback_url +
+//   '&merchant=' + requestData.merchant +
+//   '&order_id=' + requestData.order_id +
+//   '&total_amount=' + requestData.total_amount +
+//   '&key=' + secret_key;
+
+// const sign = crypto.createHash('md5').update(sigData).digest('hex');
+// requestData.sign = sign;
+// const results =await axios.post(url, requestData, {
+//   headers: {
+//     'Content-Type': 'application/json'
+//   },
+//   httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+// })
+// console.log(results.data)
+//  return res.send("hello")
+
+
+
+//  if (assignPayPayoutGateway == 1940) {
+//                 let userResponseData = [];
+//                 for (const payData of payoutJsonData1) {
+//                     var state = 'PENDING';
+//                     var stateCode = 'SUCC200';
+//                     var message = 'Payout is successfully submitted.';
+//                     var utr = '';
+//                     var urn = '';
+//                     // const trx_type = payData.trx_type;
+//                     // const ifsc = payData.ifsc;
+//                     const txn_amount = payData.Amount;
+//                     const order_no = payData.TransactionID;
+//                     var resultSqlOrder = await payouthelper.checkPayoutOrderAlreadyExist(order_no);
+//                     if (resultSqlOrder != null && resultSqlOrder != undefined && resultSqlOrder != '') {
+//                         state = 'Failed';
+//                         stateCode = 'ERR411';
+//                         message = 'The provided order ID already exists or is invalid.';
+//                         const responseMsg = {
+//                             status: state,
+//                             order_id: order_no,
+//                             payment_code: stateCode,
+//                             requested_amount: txn_amount,
+//                             payout_amount: payData.Amount,
+//                             message: message,
+//                             utr: "",
+//                             //customerOrderId: customerOrderId
+//                         }
+//                         userResponseData.push(responseMsg);
+//                         const response_array = {
+//                             status: state,
+//                             data: await payouthelper.encryptedValueNew(JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+//                             payment_code: stateCode,
+//                             message: message
+//                         }
+//                         await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+//                         return res.status(201).json({
+//                             data: {
+//                                 errorCode: 'ERR201',
+//                                 errorMessage: response_array
+//                             }
+//                         })
+
+//                     }
+//                     let optional = {};
+
+//                     if (payData && payData.Optional) {
+//                         optional = payData.Optional;
+//                     }
+//                     const uid = merchantId;
+
+//                     const ccode = payData.CurrencyCode;
+//                     const charges = await payouthelper.getMerchantPayinCharges(ccode, uid);
+
+//                     const bank_charges = 10;
+//                     if ([1139, 1177].includes(uid)) {
+//                         bank_charges = 0;
+//                     }
+
+//                     let payout_charges = 0;
+//                     let gst_charges = 0;
+//                     if (charges) {
+//                         payout_charges = charges.payout_amount ? charges.payout_amount : 0;
+//                         gst_charges = charges.gst_amount ? charges.gst_amount : 0;
+//                     }
+//                     const akonto_charge = (parseFloat(payData.Amount) * parseFloat(payout_charges)) / 100;
+//                     const gst_amount = (parseFloat(akonto_charge) * gst_charges) / 100;
+//                     const wallet_deduct = parseFloat(payData.Amount) + parseFloat(akonto_charge) + parseFloat(gst_amount) + parseFloat(bank_charges);
+//                     payData.remark = "Fastpay payout";
+
+//                     if (detail.wallet < wallet_deduct) {
+//                         state = "FAILURE";
+//                         stateCode = "ERR409";
+//                         message = "Insufficient balance in your account.";
+
+//                         const response_msg = {
+//                             status: state,
+//                             order_id: order_no,
+//                             payment_code: stateCode,
+//                             requested_amount: txn_amount,
+//                             payout_amount: payData.Amount,
+//                             currency: currency,
+//                             message: message,
+//                             utr: "",
+//                             // customerOrderId: customerOrderId
+//                         };
+
+//                         const response = {
+//                             status: "fail",
+//                             message: "Due to Insufficient balance in your account not sent to bank"
+//                         };
+
+//                         const payout_log = {
+//                             users_id: detail.id,
+//                             type: 0,
+//                             req_to_bank: JSON.stringify(payData),
+//                             res_from_bank: response,
+//                             message: "Due to Insufficient balance in your account not sent to bank"
+//                         };
+
+
+//                         await Setpayouthelper.setZovidetails(payData,
+//                             response_msg,
+//                             0,
+//                             akonto_charge,
+//                             bank_charges,
+//                             gst_amount,
+//                             wallet_deduct,
+//                             response,
+//                             payout_log,
+//                             urn,
+//                             txn_amount,
+//                             merchantId,
+//                             endpoint_url,
+//                             decryption_Data
+//                         );
+
+//                         userResponseData.push(response_msg);
+
+//                         const response_array = {
+//                             status: true,
+//                             data: await payouthelper.encryptedValueNew(
+//                                 JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+//                             payment_code: stateCode,
+//                             message: message
+//                         };
+//                         await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+
+//                         return res.status(201).json({
+//                             data: {
+//                                 errorCode: 'ERR201',
+//                                 errorMessage: response_array
+//                             }
+//                         })
+//                     }
+//                     if (detail.wallet >= wallet_deduct) {
+//                         let wallet = (detail.wallet) - (wallet_deduct)
+//                         let sqlWallet = 'UPDATE tbl_user SET wallet = ? WHERE id = ?';
+//                         await mysqlcon(sqlWallet, [wallet, merchantId]);
+//                         console.log("hello")
+//                         const wallet_log = {
+//                             order_id: order_no,
+//                             merchant_id: detail.id,
+//                             current_wallet: detail.wallet,
+//                             update_wallet_tot: detail.wallet - wallet_deduct,
+//                             current_action: 2,
+//                             login_admin: 1,
+//                             effective_amt: wallet_deduct,
+//                             created_on: formattedIST,
+//                         }
+//                         let sqlUpdateLog = 'INSERT INTO tbl_wallet_update_log SET ?';
+//                         await mysqlcon(sqlUpdateLog, [wallet_log]);
+
+//                         if (payData.BankCode.trim().length != 11) {
+//                             state = "FAILURE";
+//                             stateCode = "ERR410";
+//                             message = "You have entered an invalid IFSC";
+
+//                             let wallet = (detail.wallet) + (wallet_deduct)
+//                             let sqlWallet = 'UPDATE tbl_user SET wallet = ? WHERE id = ?';
+//                             await mysqlcon(sqlWallet, [wallet, merchantId]);
+
+//                             const wallet_log = {
+//                                 order_id: order_no,
+//                                 merchant_id: detail.id,
+//                                 current_wallet: detail.wallet,
+//                                 update_wallet_tot: detail.wallet + wallet_deduct,
+//                                 current_action: 1,
+//                                 login_admin: 1,
+//                                 effective_amt: wallet_deduct,
+//                                 created_on: formattedIST,
+//                             }
+//                             let sqlUpdateLog = 'INSERT INTO tbl_wallet_update_log SET ?';
+//                             await mysqlcon(sqlUpdateLog, [wallet_log]);
+
+//                             let response_msg = {
+//                                 status: state,
+//                                 order_id: order_no,
+//                                 payment_code: stateCode,
+//                                 requested_amount: txn_amount,
+//                                 payout_amount: payData.Amount,
+//                                 currency: currency,
+//                                 message: message,
+//                                 utr: "",
+//                                 //  customerOrderId: customerOrderId
+//                             }
+//                             const response = {
+//                                 status: 'fail',
+//                                 message: 'Due to invalid IFSC not sent to bank'
+//                             };
+
+//                             const payout_log = {
+//                                 users_id: detail.id,
+//                                 type: 0,
+//                                 req_to_bank: JSON.stringify(payData),
+//                                 res_from_bank: response,
+//                                 message: 'Due to invalid IFSC not sent to bank'
+//                             };
+
+//                             await Setpayouthelper.setZovidetails(payData,
+//                                 response_msg,
+//                                 0,
+//                                 akonto_charge,
+//                                 bank_charges,
+//                                 gst_amount,
+//                                 wallet_deduct,
+//                                 response,
+//                                 payout_log,
+//                                 urn,
+//                                 txn_amount,
+//                                 merchantId,
+//                                 endpoint_url,
+//                                 decryption_Data
+//                             );
+
+//                             userResponseData.push(response_msg);
+
+//                             const response_array = {
+//                                 status: true,
+//                                 data: await payouthelper.encryptedValueNew(
+//                                     JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+//                                 payment_code: stateCode,
+//                                 message: message
+//                             };
+
+//                             const cb_res = JSON.stringify(response_array);
+//                             const cbarr1 = {
+//                                 callback_response: cb_res
+//                             };
+//                             const updateQuery = "UPDATE tbl_icici_payout_transaction_response_details SET callback_response = ? WHERE uniqueid = ?";
+//                             await mysqlcon(updateQuery, [cbarr1.callback_response, order_no]);
+
+//                             // const cb_res = JSON.stringify(response_array);
+
+//                             const cbarr = {
+//                                 end_point_response: cb_res,
+//                                 endpoint_response_decrypt: JSON.stringify(userResponseData),
+//                                 order_no: order_no,
+//                                 type: 1
+//                             };
+
+//                             const insertQuery = "INSERT INTO tbl_payout_json (end_point_response, endpoint_response_decrypt, order_no, type) VALUES (?, ?, ?, ?)";
+//                             await mysqlcon(insertQuery, [cbarr.end_point_response, cbarr.endpoint_response_decrypt, cbarr.order_no, cbarr.type]);
+
+//                             await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+//                             return res.status(201).json({
+//                                 data: {
+//                                     errorCode: 'ERR201',
+//                                     errorMessage: response_array
+//                                 }
+//                             })
+
+//                         }
+
+//                         let scode = '471964027601';
+//                         let key = 'vowr43EjlBIslqispofr';
+
+//                         let orderid = payData.TransactionID;
+//                         let bankname = payData.ToBranch;
+//                         let money = payData.Amount;
+//                         let accountno = payData.ToAccountNumber;
+//                         let accountname = payData.ToAccountName;
+//                         let bankno = payData.BankCode;
+//                         let notifyurl = 'https://homeofbulldogs.com/dev/pay-form/wp-callback/wp-callback.php';
+
+//                         // Corrected signature string using template literals
+//                         let sign = `accountname=${accountname}&accountno=${accountno}&bankname=${bankname}&bankno=${bankno}&money=${money}&notifyurl=${notifyurl}&orderid=${orderid}&scode=${scode}&key=${key}`;
+//                         let signature = md5(sign);
+//                         // Create request object
+//                         const request = {
+//                             scode,
+//                             orderid,
+//                             bankname,
+//                             money,
+//                             accountno,
+//                             accountname,
+//                             bankno,
+//                             notifyurl,
+//                             sign: signature
+//                         };
+
+//                         // Convert to x-www-form-urlencoded
+//                         const formData = JSON.stringify(request);
+//                         let response = await axios.post(
+//                             'https://www.jzc899.com/betdf/df.aspx',
+//                             formData,
+//                             {
+//                                 headers: {
+//                                     'Content-Type': 'application/x-www-form-urlencoded'
+//                                 }
+//                             }
+//                         );
+//                         response = response.data;
+//                         const payout_log = {
+//                             users_id: detail.id,
+//                             type: 0,
+//                             req_to_bank: JSON.stringify(request),
+//                             res_from_bank: response
+//                         };
+
+//                         let sqlpayout_json = 'INSERT INTO tbl_payout_json SET ?';
+//                         await mysqlcon(sqlpayout_json, [payout_log]);
+
+//                         if (response && response.errcode == '00') {
+
+//                         } else {
+//                             console.log('bdf;lskkj')
+//                             state = "FAILURE";
+//                             stateCode = "SUCC202";
+//                             message = "Transaction failed";
+
+//                             let wallet = (detail.wallet) + (wallet_deduct)
+//                             let sqlWallet = 'UPDATE tbl_user SET wallet = ? WHERE id = ?';
+//                             await mysqlcon(sqlWallet, [wallet, merchantId]);
+
+//                             const wallet_log = {
+//                                 order_id: order_no,
+//                                 merchant_id: detail.id,
+//                                 current_wallet: detail.wallet,
+//                                 update_wallet_tot: detail.wallet + wallet_deduct,
+//                                 current_action: 1,
+//                                 login_admin: 1,
+//                                 effective_amt: wallet_deduct,
+//                                 created_on: formattedIST,
+//                             }
+//                             let sqlUpdateLog = 'INSERT INTO tbl_wallet_update_log SET ?';
+//                             await mysqlcon(sqlUpdateLog, [wallet_log]);
+//                         }
+//                         let response_msg = {
+//                             status: state,
+//                             order_id: order_no,
+//                             payment_code: stateCode,
+//                             requested_amount: txn_amount,
+//                             payout_amount: payData.Amount,
+//                             currency: currency,
+//                             message: message,
+//                             utr: '',
+//                             //  customerOrderId : customerOrderId
+//                         }
+//                         await Setpayouthelper.setZovidetails(payData,
+//                             response_msg,
+//                             0,
+//                             akonto_charge,
+//                             bank_charges,
+//                             gst_amount,
+//                             wallet_deduct,
+//                             response,
+//                             payout_log,
+//                             urn,
+//                             txn_amount,
+//                             merchantId,
+//                             endpoint_url,
+//                             decryption_Data
+//                         );
+//                         userResponseData.push(response_msg);
+//                     }
+//                 }
+//                 const response_array = {
+//                     status: state,
+//                     data: await payouthelper.encryptedValueNew(JSON.stringify(userResponseData), merchantId, merchantSecret, merchantiv),
+//                     payment_code: stateCode,
+//                     message: message
+//                 }
+//                 // const cb_res = JSON.stringify(response_array);
+//                 // const cbarr1 = {
+//                 //     callback_response: cb_res
+//                 // }
+//                 // const updateQuery = "UPDATE tbl_icici_payout_transaction_response_details SET callback_response = ? WHERE uniqueid = ?";
+//                 // await mysqlcon(updateQuery, [cbarr1.callback_response, order]);
+
+//                 // const cbarr = {
+//                 //     end_point_response: cb_res,
+//                 //     endpoint_response_decrypt: JSON.stringify(userResponseData),
+//                 //     order_no: order,
+//                 //     type: 1
+//                 // };
+
+//                 // const insertQuery = "INSERT INTO tbl_payout_json (end_point_response, endpoint_response_decrypt, order_no, type) VALUES (?, ?, ?, ?)";
+//                 // await mysqlcon(insertQuery, [cbarr.end_point_response, cbarr.endpoint_response_decrypt, cbarr.order_no, cbarr.type]);
+//                 await payouthelper.merchantPaymentStatusUpdateOnEndPoint(response_array, endpoint_url);
+//                 return res.status(201).json({
+//                     data: {
+//                         errorCode: 'ERR201',
+//                         errorMessage: response_array
+//                     }
+//                 })
+//             }
+
+
+
+
+
+
+
+
+
+
