@@ -1,0 +1,18 @@
+console.log([] + []);
+console.log([] + {});
+console.log({} + [])
+console.log({}+{})
+console.log(typeof true)
+console.log(typeof [])
+console.log(typeof {})
+console.log(typeof undefind)
+console.log(typeof Symbol())
+console.log(1 + '2');       
+console.log('1' - 1);       
+console.log(true + 1);   
+console.log(false - 1);
+console.log(NaN == NaN);
+console.log(isNaN('foo'));
+console.log(Number('foo'));
+console.log(isNaN(NaN));
+console.log(Number.isNaN(NaN));
