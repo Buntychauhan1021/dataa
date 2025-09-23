@@ -16,3 +16,5 @@ console.log(isNaN('foo'));
 console.log(Number('foo'));
 console.log(isNaN(NaN));
 console.log(Number.isNaN(NaN));
+console.log(true + false);
+console.log(false + false)
